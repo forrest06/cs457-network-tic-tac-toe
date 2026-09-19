@@ -1,0 +1,46 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Build and package output
+build/
+dist/
+*.egg-info/
+*.whl
+
+# Logs and runtime output
+*.log
+*.pid
+
+# Packet captures and generated evidence
+*.pcap
+*.pcapng
+captures/
+
+# IDE and editor state
+.idea/
+*.swp
+*.swo
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+
+# Secrets and local overrides
+.env
+.env.*
+!.env.example
+*.pem
+*.key
