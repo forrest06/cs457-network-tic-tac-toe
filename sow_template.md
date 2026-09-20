@@ -180,9 +180,9 @@ The topology below is the current plan and may be updated when subnet requiremen
 - [x] Two-player CLI game selected with role assignment, turn order, win conditions, draw conditions, and disconnect behavior defined.
 - [x] Target authoritative DNS name set to `server.fisher.edu`.
 - [x] Protocol, architecture, implementation, and CML deployment roadmap documented.
-- [ ] Public Git repository URL added after publication.
+- [x] Public Git repository URL added after publication.
 - [ ] CML runtime verified on a supported x86_64 host; the current Apple Silicon Mac cannot run the course's required local image.
 
 ## Public Git Repository
 
-**Repository URL:** To be added immediately after the repository is published.
+**Repository URL:** https://github.com/forrest06/cs457-network-tic-tac-toe

@@ -11,7 +11,7 @@
 | Python 3.x | Verified | `Python 3.9.6` |
 | Git | Verified | `git version 2.50.1 (Apple Git-155)` |
 | Editor configuration | Ready | `.editorconfig` and `.vscode/settings.json` are committed |
-| Public Git repository | Pending publication | Local repository and initial commit are ready |
+| Public Git repository | Verified | `https://github.com/forrest06/cs457-network-tic-tac-toe` is public and contains the Sprint 0 commit history |
 | Cisco Modeling Labs | Blocked on this host | Host is `arm64`; the course CML install page requires x86_64 and states that Mac M-series systems will not work |
 
 ## CML Resolution Needed
