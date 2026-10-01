@@ -20,6 +20,10 @@ dist/
 *.egg-info/
 *.whl
 
+# Locally generated documents and previews
+output/
+tmp/
+
 # Logs and runtime output
 *.log
 *.pid
