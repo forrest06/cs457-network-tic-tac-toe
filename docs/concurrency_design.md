@@ -1,6 +1,6 @@
 # Sprint 2 Concurrency Design
 
-Forrest Fisher | CS 457 - Computer Networks | October 18, 2026
+Forrest Fisher
 
 ## Server design
 
