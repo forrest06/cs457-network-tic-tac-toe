@@ -339,7 +339,7 @@ If the game is active, the connected opponent wins by forfeit. If the game has n
 
 Direction: Server -> All clients that are still connected
 
-Purpose: Report the terminal result and final authoritative board.
+Purpose: Report the terminal result, final authoritative board, and updated in-memory leaderboard. The leaderboard field was added during the Sprint 2 concurrency design so both clients receive the same round result and scores.
 
 | Field | Type | Required rule |
 |---|---|---|
@@ -352,6 +352,7 @@ Purpose: Report the terminal result and final authoritative board.
 | `payload.reason` | string | `THREE_IN_A_ROW`, `BOARD_FULL`, `PLAYER_QUIT`, or `CONNECTION_LOST`. |
 | `payload.final_board` | array | Complete 9-item final board. |
 | `payload.active_player` | null | Always `null`. |
+| `payload.leaderboard` | array | Sorted score rows. Each row has `rank`, `alias`, `wins`, `losses`, `draws`, `forfeits`, and `games_played`. |
 | `timestamp` | integer | Unix seconds. |
 
 ```json
@@ -365,7 +366,11 @@ Purpose: Report the terminal result and final authoritative board.
     "winner": "Player_1",
     "reason": "THREE_IN_A_ROW",
     "final_board": ["X", "O", null, "X", "O", null, "X", null, null],
-    "active_player": null
+    "active_player": null,
+    "leaderboard": [
+      {"rank": 1, "alias": "Forrest", "wins": 1, "losses": 0, "draws": 0, "forfeits": 0, "games_played": 1},
+      {"rank": 2, "alias": "Guest", "wins": 0, "losses": 1, "draws": 0, "forfeits": 0, "games_played": 1}
+    ]
   },
   "timestamp": 1790800020
 }

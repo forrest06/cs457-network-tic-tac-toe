@@ -1,6 +1,6 @@
 # CS 457 Network Tic-Tac-Toe
 
-Sprint 0 and Sprint 1 design repository for Forrest Fisher's CS 457 final project.
+Sprint 0 through Sprint 2 design repository for Forrest Fisher's CS 457 final project.
 
 ## Project Summary
 
@@ -15,6 +15,7 @@ Network Tic-Tac-Toe is a two-player command-line game with one authoritative Pyt
 - **Sprint 1 protocol:** [`docs/protocol_blueprint.md`](docs/protocol_blueprint.md)
 - **Sprint 1 state machine:** [`docs/fsm_specification.md`](docs/fsm_specification.md)
 - **Sprint 1 AI constraints:** [`docs/ai_prompts.md`](docs/ai_prompts.md)
+- **Sprint 2 concurrency design:** [`docs/concurrency_design.md`](docs/concurrency_design.md)
 
 ## Sprint 0 Status
 
@@ -30,6 +31,13 @@ Network Tic-Tac-Toe is a two-player command-line game with one authoritative Pyt
 - Graceful disconnects, zero-byte TCP EOF, resets, broken pipes, and timeouts all lead to one cleanup path.
 - The server game flow is defined in a GitHub-rendered Mermaid `stateDiagram-v2` diagram.
 - AI use is limited to implementing and checking the exact codec described by the project protocol documents.
+
+## Sprint 2 Status
+
+- The server uses one non-blocking `selectors` event loop to service both clients without blocking.
+- Mutable game state is isolated to the event-loop thread, with exact ownership rules for the board, turn, sequence, clients, buffers, and leaderboard.
+- Valid updates are serialized once and queued to both player sockets before the next game event is processed.
+- A Mermaid `sequenceDiagram` documents valid moves, invalid and out-of-turn moves, terminal score broadcasts, and disconnect handling.
 
 ## Planned Milestones
 
