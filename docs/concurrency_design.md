@@ -2,251 +2,168 @@
 
 Forrest Fisher | CS 457 - Computer Networks | October 18, 2026
 
-## 1. Architecture choice
+## Server design
 
-I will use Python's `selectors` module and non-blocking TCP sockets. One server thread owns the listening socket, both player sockets, and all game data. The selector tells the event loop which sockets are ready to accept, read, or write, so the server never waits on one client while the other client needs service.
+I will use Python's `selectors` module with non-blocking TCP sockets. The server will run one event loop that watches the listening socket and both player sockets. This lets the server work with both clients without getting stuck waiting for one of them.
 
-This design supports two active players at the same time. It can also briefly accept an extra connection so the server can send `ERROR/SERVER_FULL` and close it without disturbing the current game. I chose this over one thread per client because Tic-Tac-Toe has small messages and almost no CPU-heavy work. A single event loop is simpler and prevents two threads from changing the board at the same time.
+I chose this instead of using a separate thread for each client. Tic-Tac-Toe messages are small, so one event loop is enough. It also makes the game state easier to protect because only one thread can change it.
 
-The design uses the newline-delimited JSON protocol in [`protocol_blueprint.md`](protocol_blueprint.md). A single `recv()` result is never assumed to be one message.
+The server will support two active players. It can still accept a third connection long enough to send `ERROR/SERVER_FULL` and close that extra socket. Messages will follow the newline-delimited JSON rules in [`protocol_blueprint.md`](protocol_blueprint.md).
 
-## 2. Main server objects
+The main server data will be:
 
-The event-loop thread is the only code allowed to change these objects.
+| Data | What it stores |
+|---|---|
+| `ClientSession` | Socket, address, receive buffer, send buffer, alias, player ID, and closing status for one client. |
+| `GameSession` | Game ID, board, active player, sequence number, connected players, game state, and whether scores were already recorded. |
+| `leaderboard` | Wins, losses, draws, forfeits, and games played for each alias. |
 
-| Object | Main fields | Purpose |
-|---|---|---|
-| `Selector` | registered socket and `EVENT_READ`/`EVENT_WRITE` mask | Reports which sockets can make progress without blocking. |
-| `ClientSession` | `socket`, address, receive buffer, send buffer, alias, `player_id`, closing flag | Keeps all connection-specific data separate. Each client has its own framing buffers. |
-| `GameSession` | `game_id`, board, active player, sequence, player-to-socket map, state | Stores the one authoritative game. Clients never write this object directly. |
-| `leaderboard` | alias mapped to wins, losses, draws, forfeits, and games played | Stores round results in server memory for the lifetime of the server process. |
-| `next_game_number` | positive integer | Produces unique values such as `game-001` and `game-002`. |
+Each client has its own receive and send buffers. The board and other shared game data belong to the server, not either client.
 
-The planned shapes are:
+## Connection lifecycle
 
-```python
-ClientSession = {
-    "socket": socket,
-    "address": (host, port),
-    "receive_buffer": bytearray(),
-    "send_buffer": bytearray(),
-    "alias": None,
-    "player_id": None,
-    "closing_after_flush": False,
-}
+### Starting the server
 
-GameSession = {
-    "game_id": "game-001",
-    "state": "WAITING_FOR_PLAYERS",
-    "board": [None] * 9,
-    "active_player": None,
-    "sequence": 0,
-    "players": {},
-    "scores_recorded": False,
-}
-
-leaderboard = {
-    "Forrest": {
-        "wins": 0,
-        "losses": 0,
-        "draws": 0,
-        "forfeits": 0,
-        "games_played": 0,
-    }
-}
-```
-
-Aliases are unique among the two current players. Leaderboard rows are sorted by wins descending, losses ascending, and alias alphabetically so both clients display the same order.
-
-## 3. Connection lifecycle
-
-### Server startup
-
-1. Create the IPv4 TCP listening socket.
+1. Create an IPv4 TCP listening socket.
 2. Set `SO_REUSEADDR`, bind to port `45700`, and call `listen()`.
-3. Call `setblocking(False)` on the listener.
-4. Register the listener with the selector for `EVENT_READ`.
-5. Enter the event loop and call `selector.select(timeout=1.0)` repeatedly.
+3. Call `setblocking(False)` on the listening socket.
+4. Register it with the selector for `EVENT_READ`.
+5. Repeatedly call `selector.select(timeout=1.0)` in the main loop.
 
-The one-second timeout is only for housekeeping. It does not limit how quickly ready sockets are processed.
+The selector waits for socket activity from any client instead of blocking on one specific client.
 
-### Accept and registration
+### Accepting players
 
-When the listening socket is readable, the server calls `accept()` until it raises `BlockingIOError`. Each new client socket is immediately set to non-blocking mode. A new `ClientSession` is created and registered for `EVENT_READ`.
+When the listening socket is ready, the server calls `accept()` until it raises `BlockingIOError`. Every accepted client socket is immediately set to non-blocking mode and registered for `EVENT_READ`.
 
-The client is not a player until its first complete frame passes the exact `CONNECT` schema. The first accepted player becomes `Player_1`/X and receives `LOBBY_WAIT`. The second becomes `Player_2`/O. The event loop then queues `GAME_START` for both clients, with Player 1 as the active player. A third client is sent `ERROR/SERVER_FULL`, marked `closing_after_flush`, and closed after its error frame has been written.
+A connection is not assigned a player role until it sends a valid `CONNECT` message. The first valid client becomes `Player_1`/X and receives `LOBBY_WAIT`. The second becomes `Player_2`/O. The server then queues `GAME_START` for both players and makes Player 1 the first active player.
 
-### Active socket service
+### Reading and writing
 
-For every ready client, the loop handles readable work before writable work:
+For each ready client socket, the event loop does the following:
 
-- **Read:** Call `recv()` repeatedly until it would block. Append bytes to that client's receive buffer, extract every complete newline-terminated frame, and dispatch the frames in arrival order.
-- **Write:** Call `send()` only on the bytes currently at the front of that client's send buffer. Remove the number of bytes actually written. Partial writes stay buffered for the next writable event.
-- **Interest mask:** Register `EVENT_WRITE` only while a send buffer is nonempty. This prevents a writable socket from making the event loop spin continuously.
+- On `EVENT_READ`, call `recv()` until it would block. Add the bytes to that client's receive buffer and process every complete newline-terminated message.
+- On `EVENT_WRITE`, call `send()` with bytes from that client's send buffer. If only part of the data is sent, keep the rest for the next writable event.
+- Watch for `EVENT_WRITE` only when that client has data waiting to be sent.
 
-The server does not use blocking `sendall()` on client sockets. A slow client therefore cannot stop the event loop from reading the other player's move. A per-client 64 KiB send-buffer limit prevents unlimited memory growth; exceeding it is treated as a lost connection.
+The server will not use blocking `sendall()` on client sockets. This prevents a slow client from stopping the other client. Each send buffer has a 64 KiB limit so a disconnected or very slow client cannot use unlimited memory.
 
-### Disconnect and teardown
+### Closing a connection
 
-All of these events call the same idempotent `disconnect_client()` path:
+The same cleanup function handles:
 
 - a valid `DISCONNECT` message;
-- `recv()` returning `b""` for TCP EOF;
+- `recv()` returning `b""`, which means TCP EOF;
 - `ConnectionResetError`, `BrokenPipeError`, `ConnectionAbortedError`, or timeout;
-- a send-buffer overflow; or
-- normal close after a final queued message is completely written.
+- a send buffer growing past its limit; and
+- a normal close after the last queued message is sent.
 
-The teardown function marks the session as closing first, so repeated error notifications cannot close it twice. It unregisters the socket, closes it, removes it from the connection and player maps, and discards its receive and send buffers. If a game was active, the reachable opponent wins by forfeit and receives `GAME_OVER`. If only Player 1 was waiting, the lobby slot is released without creating a win. The listener stays registered so the server can start another game.
+Cleanup marks the client as closing first so the socket is not closed twice. It then unregisters and closes the socket, removes the client from the player map, and clears that client's buffers.
 
-## 4. State isolation and race prevention
+If the game was active, the remaining player wins by forfeit and receives `GAME_OVER`. If Player 1 was only waiting in the lobby, that slot is cleared without creating a winner. The listening socket stays open so another game can start.
 
-This design does not need `threading.Lock` because there is only one event-loop thread. Selector callbacks are not coroutines and do not `await`; each callback runs to completion before the loop handles the next ready event. No client handler thread can modify shared memory at the same time.
+## Keeping shared state safe
 
-The shared resources that would be vulnerable in a threaded design are protected by event-loop ownership here:
+This design does not use `threading.Lock` because all shared data is owned by one event-loop thread. Each event handler finishes before the server handles the next socket event. No second client thread can change the board at the same time.
 
-| Shared resource | Possible failure | Isolation rule |
-|---|---|---|
-| Board array | Two marks could be written into one cell. | Only the move transaction in the event-loop thread writes the board. |
-| `active_player` | Both players could pass a turn check at once. | Turn validation and turn switching happen in one callback with no yield point. |
-| Sequence number | Clients could receive conflicting versions. | It is incremented once inside the accepted-move transaction, before any broadcast is queued. |
-| Player/socket map | A disconnect could race with a move. | Read, move, and disconnect events are handled one at a time by the same loop. |
-| Client list and buffers | A broadcast could write to a closed socket entry. | The loop takes the current reachable-client list after state mutation and skips sessions already marked closing. |
-| Leaderboard | A terminal result could be counted twice. | The game state changes to `GAME_OVER` before the leaderboard update, and only that transition may update scores. |
+| Shared data | How it is protected |
+|---|---|
+| Board | Only the accepted-move handler can write a mark. |
+| Active player | The turn check and turn switch happen in the same event handler. |
+| Sequence number | It increases exactly once for each accepted move and before the update is sent. |
+| Player/socket map | Connect, move, and disconnect events are handled one at a time. |
+| Client buffers | Each socket has separate buffers that are only changed by the event loop. |
+| Leaderboard | Only the first transition to `GAME_OVER` can update scores. |
 
-### Atomic move transaction
+The server processes a `MOVE` in this order:
 
-One complete `MOVE` frame is processed as this single event-loop transaction:
+1. Validate the NDJSON frame, JSON fields, `game_id`, and the player ID assigned to that socket.
+2. Check that the sender is the active player.
+3. Check that the cell is an integer from 1 through 9 and is empty.
+4. Place the player's mark and increase the sequence number.
+5. Check for a win and then a draw.
+6. If the game continues, switch turns and create one `STATE_UPDATE`.
+7. If the round ended, freeze the game, update scores once, and create one `GAME_OVER` with the leaderboard.
+8. Serialize the result once and queue the same bytes for both connected clients before handling another event.
 
-1. Validate NDJSON framing, JSON types, message fields, `game_id`, and socket-bound `player_id`.
-2. Verify the game is in `PLAYER_TURN` and the sender equals `active_player`.
-3. Verify `cell` is an integer from 1 through 9 and the board position is empty.
-4. Write the player's mark and increment `sequence` exactly once.
-5. Test for a win and then a draw.
-6. For a nonterminal move, switch `active_player` and build one `STATE_UPDATE` snapshot.
-7. For a terminal move, freeze the game, update the leaderboard once, and build one `GAME_OVER` snapshot containing the new leaderboard.
-8. Serialize the snapshot once and append the same bytes to both reachable clients' send buffers before returning to `selector.select()`.
+If a move fails before step 4, the server sends `ERROR` only to that client. The board, sequence number, turn, and scores stay unchanged. This prevents an invalid or out-of-turn move from damaging the game state.
 
-If validation fails before step 4, the server queues `ERROR` only for the sender. The board, sequence, active player, scores, and the other client's output buffer do not change. This is how out-of-turn moves are prevented from corrupting game state.
-
-## 5. Turn and state synchronization
-
-The server is authoritative. Client timestamps and client copies of the board are never used to approve a move. The TCP socket is bound to one player during `CONNECT`, so a client cannot impersonate the other player by changing `player_id` in JSON.
+## Client synchronization sequence
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor C1 as Client 1 (Player X)
-    participant S as Selector Game Server
+    participant S as Game Server
     actor C2 as Client 2 (Player O)
 
     C1->>S: MOVE game-001, Player_1, cell 3
-    Note over S: Parse one NDJSON frame<br/>Match socket identity and game_id
-    alt Out of turn, bad cell, or occupied cell
-        S-->>C1: ERROR with recoverable code
-        Note over S: Board, sequence, turn, and scores stay unchanged
+    Note over S: Check socket identity and game ID<br/>Check active turn and cell legality
+    alt Out-of-turn move
+        S-->>C1: ERROR WRONG_TURN
+        Note over S: Board, turn, sequence, and scores do not change
+    else Invalid or occupied cell
+        S-->>C1: ERROR OUT_OF_RANGE or CELL_OCCUPIED
+        Note over S: Board, turn, sequence, and scores do not change
     else Valid nonterminal move
-        Note over S: Place X, increment sequence,<br/>switch active player to Player_2
+        Note over S: Place X, increase sequence,<br/>switch turn to Player_2
         S-->>C1: STATE_UPDATE sequence 1
         S-->>C2: STATE_UPDATE sequence 1
-        Note over C1,C2: Same serialized board snapshot is queued<br/>to both clients in one event-loop callback
+        Note over C1,C2: Both clients get the same board and turn
     else Valid move ends the round
-        Note over S: Place mark, increment sequence,<br/>freeze game, update leaderboard once
-        S-->>C1: GAME_OVER with final board and leaderboard
-        S-->>C2: GAME_OVER with final board and leaderboard
-        Note over C1,C2: Both receive the same final sequence<br/>and the same score table
+        Note over S: Place mark, increase sequence,<br/>freeze game, update scores once
+        S-->>C1: GAME_OVER with board and leaderboard
+        S-->>C2: GAME_OVER with board and leaderboard
+        Note over C1,C2: Both clients get the same final state and scores
     end
 
-    opt Client 2 disconnects during an active round
+    opt Client 2 disconnects during the game
         C2-xS: DISCONNECT, EOF, reset, or send failure
-        Note over S: Mark Player_1 as forfeit winner<br/>and update leaderboard once
-        S-->>C1: GAME_OVER result FORFEIT with leaderboard
-        Note over S: Unregister and close Client 2, then clean up game
+        Note over S: Player_1 wins by forfeit<br/>Update scores once
+        S-->>C1: GAME_OVER FORFEIT with leaderboard
+        Note over S: Close Client 2 and clean up the game
     end
 ```
 
-"Broadcast at the same time" means application-level synchronization, not identical packet arrival times. The event loop serializes one snapshot and queues it to both clients before processing any later game event. TCP may deliver the frames at slightly different wall-clock times, but both contain the same `game_id`, `sequence`, board, turn, and score data. Clients replace their local display only with a message whose sequence is newer than the one already shown.
+The two messages may not arrive at the exact same millisecond because TCP delivery time can vary. In this design, a synchronized broadcast means the server creates one state snapshot and queues the same serialized message for both clients before processing another move. Both copies have the same `game_id`, sequence number, board, turn, and scores.
 
-## 6. Score and leaderboard synchronization
+Clients only replace their displayed state when a message has a newer sequence number. This protects them from displaying an older or duplicate update.
 
-The leaderboard is a server-memory dictionary keyed by the normalized player alias. It survives individual game cleanup but resets if the server process restarts. This project does not claim persistent database storage.
+## Scores and leaderboard
 
-At the end of a round, the event loop performs these updates before creating the final message:
+Scores are kept in a server-memory dictionary using the player's normalized alias. The data stays available when one game is cleaned up, but it resets if the server program restarts. No database is planned for this version.
 
-- **Normal win:** winner gets one win; loser gets one loss; both get one game played.
-- **Draw:** both players get one draw and one game played.
-- **Forfeit:** reachable winner gets one win; departing player gets one loss and one forfeit; both get one game played.
+At the end of each round:
 
-The transition to `GAME_OVER` is the only place allowed to change these counters. A `scores_recorded` flag on the game session prevents a disconnect or failed send during cleanup from applying the result a second time.
+- For a win, the winner gets one win and the loser gets one loss.
+- For a draw, both players get one draw.
+- For a forfeit, the remaining player gets one win and the player who left gets one loss and one forfeit.
+- Both players get one additional game played.
 
-The server then creates one sorted leaderboard array and includes it in the `GAME_OVER.payload.leaderboard` field. The identical serialized `GAME_OVER` frame is queued to both reachable players. If one player already disconnected, the remaining player receives the authoritative result; the server still records both players' counters. A failed delivery never rolls back a result that was already committed.
+Only the change to `GAME_OVER` can update these numbers. A `scores_recorded` flag makes sure a later socket error during cleanup cannot count the same round twice.
 
-Example score data after Player 1's first win:
+The server sorts the leaderboard by wins, then losses, then alias. It includes the updated table in `GAME_OVER.payload.leaderboard`. The same serialized `GAME_OVER` is queued for both reachable clients. If one player already disconnected, the remaining player still receives the final result and updated scores.
+
+Example after Player 1 wins:
 
 ```json
 {
   "leaderboard": [
-    {
-      "rank": 1,
-      "alias": "Forrest",
-      "wins": 1,
-      "losses": 0,
-      "draws": 0,
-      "forfeits": 0,
-      "games_played": 1
-    },
-    {
-      "rank": 2,
-      "alias": "Guest",
-      "wins": 0,
-      "losses": 1,
-      "draws": 0,
-      "forfeits": 0,
-      "games_played": 1
-    }
+    {"rank": 1, "alias": "Forrest", "wins": 1, "losses": 0, "draws": 0, "forfeits": 0, "games_played": 1},
+    {"rank": 2, "alias": "Guest", "wins": 0, "losses": 1, "draws": 0, "forfeits": 0, "games_played": 1}
   ]
 }
 ```
 
-## 7. Broadcast and failure rules
+## Broadcast rules
 
-- A state frame is created from an immutable snapshot after the mutation is complete.
-- The server serializes that snapshot once, including the final newline delimiter.
-- The same bytes are appended to both clients' send buffers in Player 1, then Player 2 order.
-- No new `MOVE` frame is dispatched between those two queue operations.
-- Nonempty send buffers enable `EVENT_WRITE`; partial sends never cause a frame to be rebuilt.
-- A later update always has a larger `sequence`, so clients can detect stale or duplicate display data.
-- If one send fails, the other client's queued copy remains valid. The failure becomes a disconnect event and follows the forfeit/cleanup rules.
-- `ERROR` is not broadcast. It goes only to the client whose request failed because valid shared state did not change.
+- Build a complete state snapshot only after the move has been accepted.
+- Serialize that snapshot once, including its final newline delimiter.
+- Queue the same bytes for Player 1 and Player 2 before processing another `MOVE`.
+- Enable `EVENT_WRITE` for both clients with pending data.
+- Keep unsent bytes buffered when `send()` writes only part of a message.
+- Use a larger sequence number for every accepted move.
+- Send `ERROR` only to the client that made the rejected request.
+- If delivery to one client fails, keep the other client's queued update and handle the failure as a disconnect.
 
-These rules keep both clients on one server-owned version of the game without blocking the main loop.
-
-## 8. Implementation outline
-
-```text
-create non-blocking listener and selector
-register listener for read events
-
-while server is running:
-    ready_events = selector.select(timeout=1.0)
-    for key, mask in ready_events:
-        if key is listener:
-            accept every connection available without blocking
-        else:
-            if mask includes READ:
-                receive available bytes and dispatch complete frames
-            if session still exists and mask includes WRITE:
-                flush available bytes from that client's send buffer
-            update that socket's selector interest mask
-```
-
-No event handler performs blocking input, sleeps, waits for another client, or calls blocking `sendall()`. That is the main guarantee that two clients can stay connected and make progress independently.
-
-## 9. Design checklist
-
-- Two player sockets are monitored concurrently by one selector loop.
-- The full lifecycle covers accept, registration, gameplay, error handling, and teardown.
-- Shared board, turn, sequence, player map, buffers, and scores have explicit ownership rules.
-- Out-of-turn and invalid moves return `ERROR` without mutating shared state.
-- Valid state is serialized once and queued to both clients before another event is processed.
-- The Mermaid diagram uses `sequenceDiagram` and includes valid, invalid, terminal, score, and disconnect paths.
-- Score updates are applied once and included in the final broadcast to both reachable clients.
+These rules let both clients share the same server-controlled game state without blocking the main loop.
