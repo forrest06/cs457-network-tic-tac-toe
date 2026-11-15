@@ -1,0 +1,156 @@
+CS 457 Sprint 3 Local Gameplay Execution Log
+Forrest Fisher
+Tested November 15, 2026 on localhost using TCP port 45703
+
+Commands
+--------
+Terminal 1: python3 server.py -p 45703
+Terminal 2: python3 client.py -i localhost -p 45703 -n Forrest
+Terminal 3: python3 client.py -i localhost -p 45703 -n Guest
+
+Server session
+--------------
+[SERVER] Listening on 0.0.0.0:45703
+[SERVER] Waiting for Player 1 (game-001)
+[SERVER] TCP connection from 127.0.0.1:<client-port>
+[SERVER] Player_1 joined as Forrest
+[SERVER] TCP connection from 127.0.0.1:<client-port>
+[SERVER] Player_2 joined as Guest
+[SERVER] game-001 started; Player_1 moves first
+[SERVER] Accepted move 1: Player_1 chose cell 1
+[SERVER] Broadcast STATE_UPDATE sequence 1; next turn Player_2
+[SERVER] Accepted move 2: Player_2 chose cell 4
+[SERVER] Broadcast STATE_UPDATE sequence 2; next turn Player_1
+[SERVER] Accepted move 3: Player_1 chose cell 2
+[SERVER] Broadcast STATE_UPDATE sequence 3; next turn Player_2
+[SERVER] Accepted move 4: Player_2 chose cell 5
+[SERVER] Broadcast STATE_UPDATE sequence 4; next turn Player_1
+[SERVER] Accepted move 5: Player_1 chose cell 3
+[SERVER] GAME_OVER WIN; winner=Player_1
+[SERVER] Waiting for Player 1 (game-002)
+
+Client 1 session (Forrest / Player_1 / X)
+----------------------------------------------
+Connected to 127.0.0.1:45703 as Forrest
+Assigned Player 1 (X)
+Waiting for Player 2...
+
+Game started: Player_1 (X)
+ 1 | 2 | 3
+---+---+---
+ 4 | 5 | 6
+---+---+---
+ 7 | 8 | 9
+Your Turn
+Choose an empty cell (1-9), or q to quit: 1
+
+Move 1: Player_1 played cell 1
+ X | 2 | 3
+---+---+---
+ 4 | 5 | 6
+---+---+---
+ 7 | 8 | 9
+Waiting for Player_2...
+
+Move 2: Player_2 played cell 4
+ X | 2 | 3
+---+---+---
+ O | 5 | 6
+---+---+---
+ 7 | 8 | 9
+Your Turn
+Choose an empty cell (1-9), or q to quit: 2
+
+Move 3: Player_1 played cell 2
+ X | X | 3
+---+---+---
+ O | 5 | 6
+---+---+---
+ 7 | 8 | 9
+Waiting for Player_2...
+
+Move 4: Player_2 played cell 5
+ X | X | 3
+---+---+---
+ O | O | 6
+---+---+---
+ 7 | 8 | 9
+Your Turn
+Choose an empty cell (1-9), or q to quit: 3
+
+Final board:
+ X | X | X
+---+---+---
+ O | O | 6
+---+---+---
+ 7 | 8 | 9
+Game over: You win (THREE_IN_A_ROW)
+
+Score summary:
+Rank  Player               W  L  D  F  Games
+   1  Forrest               1  0  0  0      1
+   2  Guest                 0  1  0  0      1
+
+Client 2 session (Guest / Player_2 / O)
+-------------------------------------------
+Connected to 127.0.0.1:45703 as Guest
+
+Game started: Player_2 (O)
+ 1 | 2 | 3
+---+---+---
+ 4 | 5 | 6
+---+---+---
+ 7 | 8 | 9
+Waiting for Player_1...
+
+Move 1: Player_1 played cell 1
+ X | 2 | 3
+---+---+---
+ 4 | 5 | 6
+---+---+---
+ 7 | 8 | 9
+Your Turn
+Choose an empty cell (1-9), or q to quit: 4
+
+Move 2: Player_2 played cell 4
+ X | 2 | 3
+---+---+---
+ O | 5 | 6
+---+---+---
+ 7 | 8 | 9
+Waiting for Player_1...
+
+Move 3: Player_1 played cell 2
+ X | X | 3
+---+---+---
+ O | 5 | 6
+---+---+---
+ 7 | 8 | 9
+Your Turn
+Choose an empty cell (1-9), or q to quit: 5
+
+Move 4: Player_2 played cell 5
+ X | X | 3
+---+---+---
+ O | O | 6
+---+---+---
+ 7 | 8 | 9
+Waiting for Player_1...
+
+Final board:
+ X | X | X
+---+---+---
+ O | O | 6
+---+---+---
+ 7 | 8 | 9
+Game over: Player_1 wins (THREE_IN_A_ROW)
+
+Score summary:
+Rank  Player               W  L  D  F  Games
+   1  Forrest               1  0  0  0      1
+   2  Guest                 0  1  0  0      1
+
+Result
+------
+Both clients completed five alternating turns, received matching state sequence
+numbers, displayed the same final board, and displayed the same score summary.

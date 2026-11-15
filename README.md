@@ -1,6 +1,6 @@
 # CS 457 Network Tic-Tac-Toe
 
-Sprint 0 through Sprint 2 design repository for Forrest Fisher's CS 457 final project.
+Sprint 0 through Sprint 3 repository for Forrest Fisher's CS 457 final project.
 
 ## Project Summary
 
@@ -16,6 +16,7 @@ Network Tic-Tac-Toe is a two-player command-line game with one authoritative Pyt
 - **Sprint 1 state machine:** [`docs/fsm_specification.md`](docs/fsm_specification.md)
 - **Sprint 1 AI constraints:** [`docs/ai_prompts.md`](docs/ai_prompts.md)
 - **Sprint 2 concurrency design:** [`docs/concurrency_design.md`](docs/concurrency_design.md)
+- **Sprint 3 execution log:** [`docs/sprint3_execution_log.txt`](docs/sprint3_execution_log.txt)
 
 ## Sprint 0 Status
 
@@ -39,15 +40,35 @@ Network Tic-Tac-Toe is a two-player command-line game with one authoritative Pyt
 - Valid updates are serialized once and queued to both player sockets before the next game event is processed.
 - A Mermaid `sequenceDiagram` documents valid moves, invalid and out-of-turn moves, terminal score broadcasts, and disconnect handling.
 
-## Planned Milestones
+## Sprint 3 Status
 
-1. Implement and test the finalized NDJSON codec.
-2. Implement pure game-state and win/draw logic from the FSM.
-3. Implement the selector-based server and two CLI clients.
-4. Add unit and end-to-end tests, including TCP framing edge cases.
-5. Deploy the three application nodes and two routers in CML.
-6. Configure DHCP, routing, and authoritative DNS for `server.fisher.edu`.
-7. Capture and document DHCP, DNS, and gameplay traffic in Wireshark.
+- `server.py` uses a non-blocking selector loop and binds to `0.0.0.0`.
+- `client.py` resolves the supplied hostname and handles DNS failures without a traceback.
+- Both programs use the Sprint 1 newline-delimited JSON protocol and exact message schemas.
+- The server enforces turns, checks moves, broadcasts board state, handles disconnects, and updates scores.
+- Unit and localhost integration tests cover framing, game rules, CLI validation, and a complete two-client game.
+
+## Run the Game Locally
+
+Start the server in one terminal:
+
+```bash
+python3 server.py -p 45700
+```
+
+Start one client in each of two other terminals:
+
+```bash
+python3 client.py -i localhost -p 45700
+```
+
+For the later CML deployment, replace `localhost` with `server.fisher.edu`.
+
+## Remaining Milestones
+
+1. Deploy the three application nodes and two routers in CML.
+2. Configure DHCP, routing, and authoritative DNS for `server.fisher.edu`.
+3. Capture and document DHCP, DNS, and gameplay traffic in Wireshark.
 
 ## Development Setup
 
