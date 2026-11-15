@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
-"""Non-blocking two-player Network Tic-Tac-Toe server."""
-
-from __future__ import annotations
+"""Selector-based server for two-player network Tic-Tac-Toe."""
 
 import argparse
 import selectors
 import socket
 import sys
 from dataclasses import dataclass, field
-from types import TracebackType
-from typing import Any
 
-from src.game import GameState, MoveError, MoveResult
+from src.game import GameState, MoveError
 from src.protocol import (
-    NDJSONBuffer,
     MessageValidationError,
+    NDJSONBuffer,
     ProtocolViolation,
     encode_message,
     make_error,
@@ -25,29 +21,20 @@ from src.protocol import (
     validate_move,
 )
 
-MIN_PORT = 1024
-MAX_PORT = 65535
-READ_SIZE = 4096
-MAX_SEND_BUFFER = 65536
 
-
-def valid_port(value: str) -> int:
-    """Argparse type that accepts only non-privileged TCP ports."""
-
+def valid_port(value):
     try:
         port = int(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError("port must be an integer") from exc
-    if not MIN_PORT <= port <= MAX_PORT:
-        raise argparse.ArgumentTypeError(
-            f"port must be between {MIN_PORT} and {MAX_PORT}"
-        )
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("port must be an integer") from error
+    if not 1024 <= port <= 65535:
+        raise argparse.ArgumentTypeError("port must be between 1024 and 65535")
     return port
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser():
     parser = argparse.ArgumentParser(
-        description="Run the Network Tic-Tac-Toe game server.",
+        description="Run the Network Tic-Tac-Toe server.",
         epilog="Example: python3 server.py -p 45700",
     )
     parser.add_argument(
@@ -61,128 +48,92 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 @dataclass
-class ClientSession:
-    """Per-socket buffers and the identity assigned by the server."""
-
+class Client:
     sock: socket.socket
-    address: tuple[str, int]
-    framer: NDJSONBuffer = field(default_factory=NDJSONBuffer)
-    send_buffer: bytearray = field(default_factory=bytearray)
+    address: tuple
+    reader: NDJSONBuffer = field(default_factory=NDJSONBuffer)
+    output: bytearray = field(default_factory=bytearray)
     alias: str | None = None
     player_id: str | None = None
-    closing_after_flush: bool = False
+    closing: bool = False
 
 
 class GameServer:
-    """Selector-based server that owns one game at a time."""
-
-    def __init__(self, port: int) -> None:
+    def __init__(self, port):
         self.port = port
         self.selector = selectors.DefaultSelector()
-        self.listener: socket.socket | None = None
-        self.sessions: dict[socket.socket, ClientSession] = {}
-        self.players: dict[str, ClientSession] = {}
-        self.leaderboard: dict[str, dict[str, int]] = {}
+        self.listener = None
+        self.clients = {}
+        self.players = {}
+        self.scores = {}
         self.game_number = 1
-        self.game: GameState | None = None
-        self.running = False
+        self.game = None
+        self.running = True
 
     @property
-    def current_game_id(self) -> str:
+    def game_id(self):
         return f"game-{self.game_number:03d}"
 
-    def run(self) -> None:
-        """Bind to all IPv4 interfaces and service ready sockets."""
-
+    def run(self):
         self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.listener.bind(("0.0.0.0", self.port))
         self.listener.listen()
         self.listener.setblocking(False)
-        self.selector.register(self.listener, selectors.EVENT_READ, data=None)
-        self.running = True
-        self._log(f"Listening on 0.0.0.0:{self.port}")
-        self._log(f"Waiting for Player 1 ({self.current_game_id})")
+        self.selector.register(self.listener, selectors.EVENT_READ)
 
+        self.log(f"Listening on 0.0.0.0:{self.port}")
+        self.log(f"Waiting for Player 1 ({self.game_id})")
         try:
             while self.running:
-                for key, mask in self.selector.select(timeout=1.0):
-                    if key.data is None:
-                        self._accept_connections()
+                for key, mask in self.selector.select(timeout=1):
+                    if key.fileobj is self.listener:
+                        self.accept_clients()
                     else:
-                        self._service_client(key.data, mask)
+                        self.service_client(key.data, mask)
         except KeyboardInterrupt:
-            self._log("Shutdown requested")
+            self.log("Shutdown requested")
         finally:
             self.close()
 
-    def close(self) -> None:
-        """Close every socket without creating extra game results."""
-
-        self.running = False
-        for session in list(self.sessions.values()):
-            self._close_session(session, reset_when_empty=False)
-        if self.listener is not None:
-            try:
-                self.selector.unregister(self.listener)
-            except (KeyError, ValueError):
-                pass
-            self.listener.close()
-            self.listener = None
-        self.selector.close()
-        self._log("Server stopped")
-
-    def _accept_connections(self) -> None:
-        if self.listener is None:
-            return
+    def accept_clients(self):
         while True:
             try:
-                client_socket, address = self.listener.accept()
+                sock, address = self.listener.accept()
             except BlockingIOError:
                 return
-            except OSError as exc:
-                self._log(f"Accept failed: {exc}")
-                return
-            client_socket.setblocking(False)
-            session = ClientSession(client_socket, address)
-            self.sessions[client_socket] = session
-            self.selector.register(client_socket, selectors.EVENT_READ, session)
-            self._log(f"TCP connection from {address[0]}:{address[1]}")
+            sock.setblocking(False)
+            client = Client(sock, address)
+            self.clients[sock] = client
+            self.selector.register(sock, selectors.EVENT_READ, client)
+            self.log(f"TCP connection from {address[0]}:{address[1]}")
 
-    def _service_client(self, session: ClientSession, mask: int) -> None:
-        if session.sock not in self.sessions:
+    def service_client(self, client, mask):
+        if client.sock not in self.clients:
             return
-        if mask & selectors.EVENT_READ and not session.closing_after_flush:
-            self._read_client(session)
-        if session.sock not in self.sessions:
-            return
-        if mask & selectors.EVENT_WRITE:
-            self._write_client(session)
+        if mask & selectors.EVENT_READ and not client.closing:
+            self.read_client(client)
+        if client.sock in self.clients and mask & selectors.EVENT_WRITE:
+            self.write_client(client)
 
-    def _read_client(self, session: ClientSession) -> None:
-        while session.sock in self.sessions and not session.closing_after_flush:
+    def read_client(self, client):
+        while client.sock in self.clients and not client.closing:
             try:
-                data = session.sock.recv(READ_SIZE)
+                data = client.sock.recv(4096)
             except BlockingIOError:
                 return
-            except (
-                ConnectionResetError,
-                ConnectionAbortedError,
-                BrokenPipeError,
-                TimeoutError,
-                OSError,
-            ):
-                self._handle_disconnect(session, "CONNECTION_LOST")
+            except OSError:
+                self.disconnect_client(client, "CONNECTION_LOST")
                 return
 
             if not data:
-                self._handle_disconnect(session, "CONNECTION_LOST")
+                self.disconnect_client(client, "CONNECTION_LOST")
                 return
 
-            for item in session.framer.feed(data):
+            for item in client.reader.feed(data):
                 if isinstance(item, ProtocolViolation):
-                    self._send_error(
-                        session,
+                    self.send_error(
+                        client,
                         item.code,
                         item.message,
                         item.recoverable,
@@ -190,114 +141,89 @@ class GameServer:
                     if not item.recoverable:
                         return
                 else:
-                    self._dispatch(session, item)
-                    if session.sock not in self.sessions or session.closing_after_flush:
+                    self.handle_message(client, item)
+                    if client.sock not in self.clients or client.closing:
                         return
 
-    def _write_client(self, session: ClientSession) -> None:
-        if not session.send_buffer:
-            if session.closing_after_flush:
-                self._close_session(session)
-            else:
-                self._update_interest(session)
+    def write_client(self, client):
+        if not client.output:
+            self.update_events(client)
             return
         try:
-            sent = session.sock.send(session.send_buffer)
+            sent = client.sock.send(client.output)
         except BlockingIOError:
             return
-        except (
-            ConnectionResetError,
-            ConnectionAbortedError,
-            BrokenPipeError,
-            TimeoutError,
-            OSError,
-        ):
-            self._handle_disconnect(session, "CONNECTION_LOST")
+        except OSError:
+            self.disconnect_client(client, "CONNECTION_LOST")
             return
         if sent == 0:
-            self._handle_disconnect(session, "CONNECTION_LOST")
+            self.disconnect_client(client, "CONNECTION_LOST")
             return
-        del session.send_buffer[:sent]
-        if not session.send_buffer and session.closing_after_flush:
-            self._close_session(session)
-        elif session.sock in self.sessions:
-            self._update_interest(session)
+        del client.output[:sent]
+        self.update_events(client)
 
-    def _dispatch(self, session: ClientSession, message: dict[str, Any]) -> None:
+    def handle_message(self, client, message):
         try:
-            msg_type = validate_envelope(message)
-        except MessageValidationError as exc:
-            self._send_error(
-                session,
-                exc.code,
-                exc.message,
-                exc.recoverable,
-            )
+            kind = validate_envelope(message)
+        except MessageValidationError as error:
+            self.send_validation_error(client, error)
             return
 
-        if session.player_id is None:
-            if msg_type != "CONNECT":
-                self._send_error(
-                    session,
+        if client.player_id is None:
+            if kind == "CONNECT":
+                self.connect_player(client, message)
+            else:
+                self.send_error(
+                    client,
                     "UNEXPECTED_MESSAGE",
-                    "CONNECT is required before any other message",
+                    "Send CONNECT first",
                 )
-                return
-            self._handle_connect(session, message)
             return
 
-        if msg_type == "MOVE":
-            self._handle_move(session, message)
-        elif msg_type == "DISCONNECT":
-            self._handle_disconnect_message(session, message)
+        if kind == "MOVE":
+            self.play_move(client, message)
+        elif kind == "DISCONNECT":
+            self.handle_quit(client, message)
         else:
-            self._send_error(
-                session,
+            self.send_error(
+                client,
                 "UNEXPECTED_MESSAGE",
-                f"{msg_type} is not a valid client message now",
+                f"{kind} is not allowed here",
             )
 
-    def _handle_connect(
-        self,
-        session: ClientSession,
-        message: dict[str, Any],
-    ) -> None:
+    def connect_player(self, client, message):
         try:
             alias = validate_connect(message)
-        except MessageValidationError as exc:
-            self._send_error(session, exc.code, exc.message, exc.recoverable)
+        except MessageValidationError as error:
+            self.send_validation_error(client, error)
             return
 
-        if len(self.players) >= 2:
-            self._send_error(
-                session,
+        if len(self.players) == 2:
+            self.send_error(
+                client,
                 "SERVER_FULL",
                 "Two players are already connected",
-                recoverable=False,
+                False,
             )
             return
         if any(player.alias == alias for player in self.players.values()):
-            self._send_error(
-                session,
-                "INVALID_PAYLOAD",
-                "That alias is already in use",
-            )
+            self.send_error(client, "INVALID_PAYLOAD", "That name is in use")
             return
 
-        player_id = "Player_1" if "Player_1" not in self.players else "Player_2"
-        session.alias = alias
-        session.player_id = player_id
-        self.players[player_id] = session
-        self._ensure_score_row(alias)
-        self._log(f"{player_id} joined as {alias}")
+        player_id = "Player_1" if not self.players else "Player_2"
+        client.alias = alias
+        client.player_id = player_id
+        self.players[player_id] = client
+        self.score_row(alias)
+        self.log(f"{player_id} joined as {alias}")
 
         if player_id == "Player_1":
-            self._queue_message(
-                session,
+            self.queue(
+                client,
                 {
                     "version": 1,
                     "msg_type": "LOBBY_WAIT",
-                    "game_id": self.current_game_id,
+                    "game_id": self.game_id,
                     "player_id": "Player_1",
                     "payload": {
                         "mark": "X",
@@ -309,70 +235,57 @@ class GameServer:
             )
             return
 
-        self.game = GameState(self.current_game_id)
-        start_message = {
-            "version": 1,
-            "msg_type": "GAME_START",
-            "game_id": self.game.game_id,
-            "sequence": 0,
-            "payload": {
-                "roles": {"Player_1": "X", "Player_2": "O"},
-                "board": list(self.game.board),
-                "active_player": "Player_1",
-            },
-            "timestamp": unix_time(),
-        }
-        self._broadcast(start_message)
-        self._log(f"{self.game.game_id} started; Player_1 moves first")
+        self.game = GameState(self.game_id)
+        self.broadcast(
+            {
+                "version": 1,
+                "msg_type": "GAME_START",
+                "game_id": self.game.game_id,
+                "sequence": 0,
+                "payload": {
+                    "roles": {"Player_1": "X", "Player_2": "O"},
+                    "board": list(self.game.board),
+                    "active_player": "Player_1",
+                },
+                "timestamp": unix_time(),
+            }
+        )
+        self.log(f"{self.game.game_id} started; Player_1 moves first")
 
-    def _handle_move(
-        self,
-        session: ClientSession,
-        message: dict[str, Any],
-    ) -> None:
+    def play_move(self, client, message):
         try:
             cell = validate_move(message)
-        except MessageValidationError as exc:
-            self._send_error(session, exc.code, exc.message, exc.recoverable)
+        except MessageValidationError as error:
+            self.send_validation_error(client, error)
             return
 
         if self.game is None:
-            self._send_error(
-                session,
-                "UNEXPECTED_MESSAGE",
-                "The game has not started",
-            )
+            self.send_error(client, "UNEXPECTED_MESSAGE", "Game has not started")
             return
         if message["game_id"] != self.game.game_id:
-            self._send_error(
-                session,
-                "INVALID_PAYLOAD",
-                "game_id does not match this game",
-            )
+            self.send_error(client, "INVALID_PAYLOAD", "Wrong game_id")
             return
-        if message["player_id"] != session.player_id:
-            self._send_error(
-                session,
-                "INVALID_PAYLOAD",
-                "player_id does not match this socket",
-            )
+        if message["player_id"] != client.player_id:
+            self.send_error(client, "INVALID_PAYLOAD", "Wrong player_id")
             return
 
         try:
-            result = self.game.apply_move(session.player_id, cell)
-        except MoveError as exc:
-            self._send_error(session, exc.code, exc.message)
-            self._log(f"Rejected {session.player_id} move: {exc.code}")
+            result = self.game.apply_move(client.player_id, cell)
+        except MoveError as error:
+            self.send_error(client, error.code, error.message)
+            self.log(f"Rejected {client.player_id} move: {error.code}")
             return
 
-        self._log(
+        self.log(
             f"Accepted move {self.game.sequence}: "
-            f"{session.player_id} chose cell {cell}"
+            f"{client.player_id} chose cell {cell}"
         )
         if result.terminal:
-            self._finish_game(result)
-        else:
-            update = {
+            self.finish_game(result.result, result.winner, result.reason)
+            return
+
+        self.broadcast(
+            {
                 "version": 1,
                 "msg_type": "STATE_UPDATE",
                 "game_id": self.game.game_id,
@@ -387,235 +300,165 @@ class GameServer:
                 },
                 "timestamp": unix_time(),
             }
-            self._broadcast(update)
-            self._log(
-                f"Broadcast STATE_UPDATE sequence {self.game.sequence}; "
-                f"next turn {self.game.active_player}"
-            )
+        )
+        self.log(
+            f"Broadcast STATE_UPDATE sequence {self.game.sequence}; "
+            f"next turn {self.game.active_player}"
+        )
 
-    def _handle_disconnect_message(
-        self,
-        session: ClientSession,
-        message: dict[str, Any],
-    ) -> None:
+    def handle_quit(self, client, message):
         try:
             validate_disconnect(message)
-        except MessageValidationError as exc:
-            self._send_error(session, exc.code, exc.message, exc.recoverable)
+        except MessageValidationError as error:
+            self.send_validation_error(client, error)
             return
-        if self.game is not None and message["game_id"] != self.game.game_id:
-            self._send_error(
-                session,
-                "INVALID_PAYLOAD",
-                "game_id does not match this game",
-            )
+        if message["player_id"] != client.player_id:
+            self.send_error(client, "INVALID_PAYLOAD", "Wrong player_id")
             return
-        if message["player_id"] != session.player_id:
-            self._send_error(
-                session,
-                "INVALID_PAYLOAD",
-                "player_id does not match this socket",
-            )
+        if self.game and message["game_id"] != self.game.game_id:
+            self.send_error(client, "INVALID_PAYLOAD", "Wrong game_id")
             return
-        self._handle_disconnect(session, "PLAYER_QUIT")
+        self.disconnect_client(client, "PLAYER_QUIT")
 
-    def _finish_game(self, result: MoveResult) -> None:
-        if self.game is None:
-            return
-        self._record_scores(result.result, result.winner)
-        message = self._game_over_message(
-            result=result.result or "DRAW",
-            winner=result.winner,
-            reason=result.reason or "BOARD_FULL",
-        )
-        self._broadcast(message)
-        self._log(
-            f"GAME_OVER {message['payload']['result']}; "
-            f"winner={message['payload']['winner']}"
-        )
-        self._close_players_after_flush()
+    def finish_game(self, result, winner, reason):
+        self.record_scores(result, winner)
+        message = self.game_over_message(result, winner, reason)
+        self.broadcast(message)
+        self.log(f"GAME_OVER {result}; winner={winner}")
+        for client in list(self.players.values()):
+            client.closing = True
+            self.update_events(client)
 
-    def _handle_disconnect(self, session: ClientSession, reason: str) -> None:
-        if session.sock not in self.sessions:
+    def disconnect_client(self, client, reason):
+        if client.sock not in self.clients:
             return
-        player_id = session.player_id
-        alias = session.alias
-        self._log(f"Disconnected {player_id or session.address}: {reason}")
+        player_id = client.player_id
+        self.log(f"Disconnected {player_id or client.address}: {reason}")
 
         opponent_id = None
         if player_id == "Player_1":
             opponent_id = "Player_2"
         elif player_id == "Player_2":
             opponent_id = "Player_1"
-        opponent = self.players.get(opponent_id) if opponent_id else None
+        opponent = self.players.get(opponent_id)
 
-        if (
-            self.game is not None
-            and self.game.state == "PLAYER_TURN"
-            and opponent is not None
-        ):
+        if self.game and self.game.state == "PLAYER_TURN" and opponent:
             self.game.state = "GAME_OVER"
             self.game.active_player = None
-            self._record_scores("FORFEIT", opponent_id)
-            final_message = self._game_over_message(
-                result="FORFEIT",
-                winner=opponent_id,
-                reason=reason,
+            self.record_scores("FORFEIT", opponent_id)
+            self.queue(
+                opponent,
+                self.game_over_message("FORFEIT", opponent_id, reason),
             )
-            self._queue_message(opponent, final_message)
-            opponent.closing_after_flush = True
-            self._update_interest(opponent)
-            self._log(
-                f"GAME_OVER FORFEIT; winner={opponent_id}; "
-                f"departed={alias or player_id}"
-            )
+            opponent.closing = True
+            self.update_events(opponent)
+            self.log(f"GAME_OVER FORFEIT; winner={opponent_id}")
 
-        self._close_session(session)
+        self.close_client(client)
 
-    def _send_error(
-        self,
-        session: ClientSession,
-        code: str,
-        message: str,
-        recoverable: bool = True,
-    ) -> None:
-        game_id = (
-            self.game.game_id
-            if self.game is not None and session.player_id is not None
-            else None
+    def send_validation_error(self, client, error):
+        self.send_error(client, error.code, error.message, error.recoverable)
+
+    def send_error(self, client, code, text, recoverable=True):
+        game_id = None
+        if self.game is not None and client.player_id is not None:
+            game_id = self.game.game_id
+        self.queue(
+            client,
+            make_error(code, text, game_id, client.player_id, recoverable),
         )
-        self._queue_message(
-            session,
-            make_error(
-                code,
-                message,
-                game_id,
-                session.player_id,
-                recoverable,
-            ),
-        )
-        if not recoverable and session.sock in self.sessions:
-            session.closing_after_flush = True
-            self._update_interest(session)
+        if not recoverable and client.sock in self.clients:
+            client.closing = True
+            self.update_events(client)
 
-    def _broadcast(self, message: dict[str, Any]) -> None:
-        """Queue exactly the same serialized frame for both player sockets."""
-
+    def broadcast(self, message):
+        """Serialize once, then give the same frame to both clients."""
         frame = encode_message(message)
         for player_id in ("Player_1", "Player_2"):
-            session = self.players.get(player_id)
-            if session is not None:
-                self._queue_frame(session, frame)
+            client = self.players.get(player_id)
+            if client:
+                self.queue_frame(client, frame)
 
-    def _queue_message(
-        self,
-        session: ClientSession,
-        message: dict[str, Any],
-    ) -> None:
-        self._queue_frame(session, encode_message(message))
+    def queue(self, client, message):
+        self.queue_frame(client, encode_message(message))
 
-    def _queue_frame(self, session: ClientSession, frame: bytes) -> None:
-        if session.sock not in self.sessions:
+    def queue_frame(self, client, frame):
+        if client.sock not in self.clients:
             return
-        if len(session.send_buffer) + len(frame) > MAX_SEND_BUFFER:
-            self._handle_disconnect(session, "CONNECTION_LOST")
+        if len(client.output) + len(frame) > 65536:
+            self.disconnect_client(client, "CONNECTION_LOST")
             return
-        session.send_buffer.extend(frame)
-        self._update_interest(session)
+        client.output.extend(frame)
+        self.update_events(client)
 
-    def _update_interest(self, session: ClientSession) -> None:
-        if session.sock not in self.sessions:
+    def update_events(self, client):
+        if client.sock not in self.clients:
             return
-        events = 0 if session.closing_after_flush else selectors.EVENT_READ
-        if session.send_buffer:
+        events = 0 if client.closing else selectors.EVENT_READ
+        if client.output:
             events |= selectors.EVENT_WRITE
         if events == 0:
-            self._close_session(session)
+            self.close_client(client)
             return
         try:
-            self.selector.modify(session.sock, events, session)
-        except (KeyError, ValueError, OSError):
-            self._close_session(session)
+            self.selector.modify(client.sock, events, client)
+        except (KeyError, OSError):
+            self.close_client(client)
 
-    def _close_players_after_flush(self) -> None:
-        for session in list(self.players.values()):
-            if session.sock in self.sessions:
-                session.closing_after_flush = True
-                self._update_interest(session)
-
-    def _close_session(
-        self,
-        session: ClientSession,
-        reset_when_empty: bool = True,
-    ) -> None:
-        if session.sock not in self.sessions:
+    def close_client(self, client, reset=True):
+        if client.sock not in self.clients:
             return
         try:
-            self.selector.unregister(session.sock)
-        except (KeyError, ValueError, OSError):
+            self.selector.unregister(client.sock)
+        except (KeyError, OSError):
             pass
-        self.sessions.pop(session.sock, None)
-        if session.player_id is not None:
-            self.players.pop(session.player_id, None)
-        try:
-            session.sock.close()
-        except OSError:
-            pass
-        session.send_buffer.clear()
-        session.framer.buffer.clear()
-        if reset_when_empty and session.player_id is not None and not self.players:
-            self._reset_game()
+        self.clients.pop(client.sock, None)
+        if client.player_id:
+            self.players.pop(client.player_id, None)
+        client.sock.close()
+        if reset and client.player_id and not self.players:
+            self.game = None
+            self.game_number += 1
+            self.log(f"Waiting for Player 1 ({self.game_id})")
 
-    def _reset_game(self) -> None:
-        self.game = None
-        self.game_number += 1
-        self._log(f"Waiting for Player 1 ({self.current_game_id})")
-
-    def _record_scores(self, result: str | None, winner: str | None) -> None:
+    def record_scores(self, result, winner):
         if self.game is None or self.game.scores_recorded:
             return
         first = self.players.get("Player_1")
         second = self.players.get("Player_2")
-        if (
-            first is None
-            or second is None
-            or first.alias is None
-            or second.alias is None
-        ):
+        if not first or not second:
             return
-        first_score = self._ensure_score_row(first.alias)
-        second_score = self._ensure_score_row(second.alias)
-        first_score["games_played"] += 1
-        second_score["games_played"] += 1
+        one = self.score_row(first.alias)
+        two = self.score_row(second.alias)
+        one["games_played"] += 1
+        two["games_played"] += 1
+
         if result == "DRAW":
-            first_score["draws"] += 1
-            second_score["draws"] += 1
+            one["draws"] += 1
+            two["draws"] += 1
         else:
-            winner_session = self.players.get(winner or "")
-            loser_session = second if winner == "Player_1" else first
-            if winner_session is not None and winner_session.alias is not None:
-                self.leaderboard[winner_session.alias]["wins"] += 1
-            if loser_session.alias is not None:
-                self.leaderboard[loser_session.alias]["losses"] += 1
-                if result == "FORFEIT":
-                    self.leaderboard[loser_session.alias]["forfeits"] += 1
+            winner_client = self.players[winner]
+            loser_client = second if winner == "Player_1" else first
+            self.scores[winner_client.alias]["wins"] += 1
+            self.scores[loser_client.alias]["losses"] += 1
+            if result == "FORFEIT":
+                self.scores[loser_client.alias]["forfeits"] += 1
         self.game.scores_recorded = True
 
-    def _ensure_score_row(self, alias: str) -> dict[str, int]:
-        return self.leaderboard.setdefault(
-            alias,
-            {
+    def score_row(self, alias):
+        if alias not in self.scores:
+            self.scores[alias] = {
                 "wins": 0,
                 "losses": 0,
                 "draws": 0,
                 "forfeits": 0,
                 "games_played": 0,
-            },
-        )
+            }
+        return self.scores[alias]
 
-    def _leaderboard_rows(self) -> list[dict[str, Any]]:
-        sorted_rows = sorted(
-            self.leaderboard.items(),
+    def leaderboard(self):
+        rows = sorted(
+            self.scores.items(),
             key=lambda item: (
                 -item[1]["wins"],
                 item[1]["losses"],
@@ -623,18 +466,11 @@ class GameServer:
             ),
         )
         return [
-            {"rank": rank, "alias": alias, **scores}
-            for rank, (alias, scores) in enumerate(sorted_rows, start=1)
+            {"rank": rank, "alias": alias, **score}
+            for rank, (alias, score) in enumerate(rows, 1)
         ]
 
-    def _game_over_message(
-        self,
-        result: str,
-        winner: str | None,
-        reason: str,
-    ) -> dict[str, Any]:
-        if self.game is None:
-            raise RuntimeError("cannot create GAME_OVER without a game")
+    def game_over_message(self, result, winner, reason):
         return {
             "version": 1,
             "msg_type": "GAME_OVER",
@@ -646,35 +482,36 @@ class GameServer:
                 "reason": reason,
                 "final_board": list(self.game.board),
                 "active_player": None,
-                "leaderboard": self._leaderboard_rows(),
+                "leaderboard": self.leaderboard(),
             },
             "timestamp": unix_time(),
         }
 
+    def close(self):
+        self.running = False
+        for client in list(self.clients.values()):
+            self.close_client(client, reset=False)
+        if self.listener is not None:
+            try:
+                self.selector.unregister(self.listener)
+            except (KeyError, OSError):
+                pass
+            self.listener.close()
+        self.selector.close()
+        self.log("Server stopped")
+
     @staticmethod
-    def _log(message: str) -> None:
+    def log(message):
         print(f"[SERVER] {message}", flush=True)
 
-    def __enter__(self) -> "GameServer":
-        return self
 
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_value: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
-        self.close()
-
-
-def main(argv: list[str] | None = None) -> int:
+def main(argv=None):
     args = build_parser().parse_args(argv)
-    server = GameServer(args.port)
     try:
-        server.run()
-    except OSError as exc:
+        GameServer(args.port).run()
+    except OSError as error:
         print(
-            f"[ERROR] Unable to bind server to 0.0.0.0:{args.port}: {exc}",
+            f"[ERROR] Unable to bind server to 0.0.0.0:{args.port}: {error}",
             file=sys.stderr,
         )
         return 1
