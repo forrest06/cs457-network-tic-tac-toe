@@ -1,6 +1,6 @@
 # CS 457 Network Tic-Tac-Toe
 
-Sprint 0 through Sprint 3 repository for Forrest Fisher's CS 457 final project.
+Sprint 0 through Sprint 4 repository for Forrest Fisher's CS 457 final project.
 
 ## Project Summary
 
@@ -23,7 +23,7 @@ Network Tic-Tac-Toe is a two-player command-line game with one authoritative Pyt
 - Python 3 and Git are installed and verified.
 - A Python-focused `.gitignore`, EditorConfig file, and VS Code project settings are committed.
 - Game scope, rules, victory conditions, draw handling, DNS name, protocol direction, concurrency strategy, implementation plan, and CML deployment plan are documented in the SOW.
-- CML validation remains dependent on access to a supported x86_64 host. The course instructions state that the required local CML image does not run on Apple Silicon, and the current development computer is `arm64`.
+- The local Apple Silicon Mac connects to the course CML server through a browser.
 
 ## Sprint 1 Status
 
@@ -62,13 +62,15 @@ Start one client in each of two other terminals:
 python3 client.py -i localhost -p 45700
 ```
 
-For the later CML deployment, replace `localhost` with `server.fisher.edu`.
+In the Sprint 4 CML lab, connect to `server.fisher.edu` from either client node.
 
-## Remaining Milestones
+## Sprint 4 CML Deployment
 
-1. Deploy the three application nodes and two routers in CML.
-2. Configure DHCP, routing, and authoritative DNS for `server.fisher.edu`.
-3. Capture and document DHCP, DNS, and gameplay traffic in Wireshark.
+One IOSv router connects the two DHCP clients to the static game server on three separate subnets. Both clients reached the server with zero packet loss and resolved `server.fisher.edu` to `192.168.20.100`. They then completed a five-move game over TCP port `45700`.
+
+- [CML topology export](sprint_4_topology.yaml)
+- [DNS packet capture](sprint_4_dns_lookup.pcap)
+- [Network verification report](sprint_4_network_report.pdf)
 
 ## Development Setup
 
